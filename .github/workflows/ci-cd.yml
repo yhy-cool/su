@@ -20,6 +20,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20.x'
+          cache: 'npm' # 开启缓存，加速后续构建
+          cache-dependency-path: |
+            frontend/package-lock.json
+            backend/package-lock.json
 
       - name: Install backend dependencies
         working-directory: ./backend
@@ -37,7 +41,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: frontend-build
-          path: frontend/dist/
+          path: frontend/dist/ # 确保你的前端打包输出确实在这个目录
 
   deploy:
     runs-on: ubuntu-latest
@@ -60,15 +64,29 @@ jobs:
           SERVER_HOST: ${{ secrets.SERVER_HOST }}
           SERVER_USER: ${{ secrets.SERVER_USER }}
         run: |
+          # 配置 SSH 密钥
           mkdir -p ~/.ssh
           echo "$DEPLOY_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H $SERVER_HOST >> ~/.ssh/known_hosts
           
-          scp -r frontend/dist/* $SERVER_USER@$SERVER_HOST:/var/www/lanyueliang/frontend/
-          scp -r backend/* $SERVER_USER@$SERVER_HOST:/var/www/lanyueliang/backend/
+          # 1. 先清理远程服务器的前端旧文件，防止新旧文件堆积导致 Bug
+          ssh $SERVER_USER@$SERVER_HOST "rm -rf /var/www/lanyueliang/frontend/*"
           
-          ssh $SERVER_USER@$SERVER_HOST << 'EOF'
+          # 2. 传输最新的前端构建产物
+          scp -r frontend/dist/* $SERVER_USER@$SERVER_HOST:/var/www/lanyueliang/frontend/
+          
+          # 3. 传输后端代码（使用 rsync 排除 node_modules，避免把本地无用文件传上去）
+          # 如果服务器没装 rsync，可以用 scp，但注意先在本地把 backend/node_modules 删掉
+          if command -v rsync >/dev/null 2>&1; then
+            rsync -avz --exclude 'node_modules' backend/ $SERVER_USER@$SERVER_HOST:/var/www/lanyueliang/backend/
+          else
+            rm -rf backend/node_modules # 确保不把非 Linux 环境的依赖传上去
+            scp -r backend/* $SERVER_USER@$SERVER_HOST:/var/www/lanyueliang/backend/
+          fi
+          
+          # 4. 远程执行服务器命令（注意这里用 EOF，不用单引号，允许内部使用变量）
+          ssh $SERVER_USER@$SERVER_HOST << EOF
             cd /var/www/lanyueliang/backend
             npm ci --production
             pm2 restart lanyueliang-backend || pm2 start app.js --name lanyueliang-backend
